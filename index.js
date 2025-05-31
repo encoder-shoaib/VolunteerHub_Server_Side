@@ -23,11 +23,11 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    await client.connect();
+    // await client.connect();
 
     const db = client.db("Volunteer_Hub");
     const userCollection = db.collection("users");
-    const volunteersCollection = db.collection("volunteers");
+    const volunteersCollection = db.collection("volunteer_requests");
     const postsCollection = db.collection("posts");
 
     // ============================
@@ -94,208 +94,204 @@ async function run() {
       res.send(result);
     });
 
+    // Mock auth check endpoint (replace with actual auth middleware)
+    app.get("/auth/check", async (req, res) => {
+      const user = await userCollection.findOne({
+        email: "john.doe@example.com",
+      });
+      res.send({ user });
+    });
+
     // ============================
     // POST ENDPOINTS
     // ============================
-    app.get("/api/posts", async (req, res) => {
+    app.post("/posts", async (req, res) => {
+      const post = {
+        ...req.body,
+        createdAt: new Date().toISOString(),
+      };
       try {
-        const posts = await postsCollection
-          .find()
-          .sort({ deadline: 1 })
-          .limit(6)
-          .toArray();
-        res.json(posts);
+        const result = await postsCollection.insertOne(post);
+        res.send({ ...post, _id: result.insertedId });
       } catch (error) {
-        console.error("[Backend] Error fetching limited posts:", error);
-        res.status(500).json({ error: "Failed to fetch posts" });
+        console.error("Error creating post:", error);
+        res.status(500).send({ error: "Failed to create post" });
       }
     });
 
-    app.get("/api/posts/all", async (req, res) => {
+    app.get("/posts", async (req, res) => {
+      const { limit, sort, search } = req.query;
+      const query = search ? { title: { $regex: search, $options: "i" } } : {};
+      const options = sort
+        ? { sort: { deadline: 1 }, limit: parseInt(limit) || 0 }
+        : {};
       try {
-        const posts = await postsCollection
-          .find()
-          .sort({ deadline: 1 })
-          .toArray();
-        res.json(posts);
+        const result = await postsCollection.find(query, options).toArray();
+        res.send(result);
       } catch (error) {
-        console.error("[Backend] Error fetching all posts:", error);
-        res.status(500).json({ error: "Failed to fetch all posts" });
+        console.error("Error fetching posts:", error);
+        res.status(500).send({ error: "Failed to fetch posts" });
       }
     });
 
-    app.get("/api/posts/:id", async (req, res) => {
+    app.get("/posts/:id", async (req, res) => {
       try {
-        const id = req.params.id;
-        if (!ObjectId.isValid(id)) {
-          console.warn(`[Backend] Invalid post ID format requested: ${id}`);
-          return res.status(400).json({ error: "Invalid post ID format" });
-        }
-        const post = await postsCollection.findOne({ _id: new ObjectId(id) });
+        const post = await postsCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
         if (!post) {
-          console.warn(`[Backend] Post not found for ID: ${id}`);
-          return res.status(404).json({ error: "Post not found" });
+          return res.status(404).send({ error: "Post not found" });
         }
-        res.json(post);
+        res.send(post);
       } catch (error) {
-        console.error("[Backend] Error fetching post by ID:", error);
-        res.status(500).json({ error: "Failed to fetch post" });
+        console.error("Error fetching post:", error);
+        res.status(500).send({ error: "Failed to fetch post" });
       }
     });
 
-    app.post("/api/posts", async (req, res) => {
+    app.put("/posts/:id", async (req, res) => {
+      const postId = req.params.id;
+      const updateData = {
+        ...req.body,
+        updatedAt: new Date().toISOString(),
+      };
       try {
-        const newPost = req.body;
-        // Ensure new posts always have volunteersNeeded initialized
+        const post = await postsCollection.findOne({
+          _id: new ObjectId(postId),
+        });
+        if (!post) {
+          return res.status(404).send({ error: "Post not found" });
+        }
+        if (post.organizerEmail !== req.body.organizerEmail) {
+          return res
+            .status(403)
+            .send({ error: "Unauthorized to update this post" });
+        }
+        const result = await postsCollection.updateOne(
+          { _id: new ObjectId(postId) },
+          { $set: updateData }
+        );
+        if (result.modifiedCount === 0) {
+          return res.status(400).send({ error: "No changes made to the post" });
+        }
+        res.send({ ...post, ...updateData });
+      } catch (error) {
+        console.error("Error updating post:", error);
+        res.status(500).send({ error: "Failed to update post" });
+      }
+    });
+
+    app.delete("/posts/:id", async (req, res) => {
+      try {
+        const post = await postsCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (!post) {
+          return res.status(404).send({ error: "Post not found" });
+        }
+        if (req.query.email && post.organizerEmail !== req.query.email) {
+          return res
+            .status(403)
+            .send({ error: "Unauthorized to delete this post" });
+        }
+        const result = await postsCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.send(result);
+      } catch (error) {
+        console.error("Error deleting post:", error);
+        res.status(500).send({ error: "Failed to delete post" });
+      }
+    });
+
+    app.get("/my-posts", async (req, res) => {
+      const { email } = req.query;
+      if (!email) {
+        return res.status(400).send({ error: "Email is required" });
+      }
+      try {
+        const posts = await postsCollection
+          .find({ organizerEmail: email })
+          .sort({ deadline: 1 })
+          .toArray();
+        res.send(posts);
+      } catch (error) {
+        console.error("Error fetching user's posts:", error);
+        res.status(500).send({ error: "Failed to fetch posts" });
+      }
+    });
+
+    app.patch("/posts/:id/volunteer", async (req, res) => {
+      const { volunteersNeeded } = req.body;
+      try {
+        const result = await postsCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { volunteersNeeded } }
+        );
+        res.send(result);
+      } catch (error) {
+        console.error("Error updating volunteers needed:", error);
+        res.status(500).send({ error: "Failed to update post" });
+      }
+    });
+
+    // ============================
+    // VOLUNTEER REQUEST ENDPOINTS
+    // ============================
+    app.post("/volunteer-requests", async (req, res) => {
+      const request = {
+        ...req.body,
+        createdAt: new Date().toISOString(),
+      };
+      try {
+        const result = await volunteersCollection.insertOne(request);
+        res.send({ ...request, _id: result.insertedId });
+      } catch (error) {
+        console.error("Error creating volunteer request:", error);
+        res.status(500).send({ error: "Failed to create volunteer request" });
+      }
+    });
+
+    app.get("/my-volunteer-requests", async (req, res) => {
+      const { email } = req.query;
+      if (!email) {
+        return res.status(400).send({ error: "Email is required" });
+      }
+      try {
+        const requests = await volunteersCollection
+          .find({ volunteerEmail: email })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(requests);
+      } catch (error) {
+        console.error("Error fetching user's volunteer requests:", error);
+        res.status(500).send({ error: "Failed to fetch volunteer requests" });
+      }
+    });
+
+    app.delete("/volunteer-requests/:id", async (req, res) => {
+      try {
+        const request = await volunteersCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (!request) {
+          return res.status(404).send({ error: "Volunteer request not found" });
+        }
         if (
-          newPost.volunteersNeeded === undefined ||
-          newPost.volunteersNeeded === null
+          req.body.volunteerEmail &&
+          request.volunteerEmail !== req.body.volunteerEmail
         ) {
-          newPost.volunteersNeeded = 1; // Default to 1 if not provided, or set to 0 if that's your starting point
+          return res
+            .status(403)
+            .send({ error: "Unauthorized to delete this request" });
         }
-        const result = await postsCollection.insertOne(newPost);
-        res.status(201).json({ ...newPost, _id: result.insertedId });
+        const result = await volunteersCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.send(result);
       } catch (error) {
-        console.error("[Backend] Error creating new post:", error);
-        res.status(500).json({ error: "Failed to create post" });
-      }
-    });
-
-    // ============================
-    // VOLUNTEER REGISTRATION ENDPOINTS
-    // ============================
-
-    app.get("/api/volunteers", async (req, res) => {
-      try {
-        const { postId, userEmail } = req.query;
-
-        if (!postId || !userEmail) {
-          return res
-            .status(400)
-            .json({
-              error: "postId and userEmail are required query parameters.",
-            });
-        }
-
-        const exists = await volunteersCollection.findOne({
-          postId, // Stored as string in volunteers collection
-          userEmail,
-        });
-
-        res.json({ exists: !!exists });
-      } catch (error) {
-        console.error(
-          "[Backend] Error checking volunteer registration:",
-          error
-        );
-        res
-          .status(500)
-          .json({ error: "Failed to check volunteer registration." });
-      }
-    });
-
-    app.post("/api/volunteers", async (req, res) => {
-      const { postId, userId, userName, userEmail } = req.body;
-      console.log(
-        `[Backend] Attempting to register volunteer for postId: ${postId}, userEmail: ${userEmail}`
-      );
-
-      try {
-        // Validate postId format before proceeding
-        if (!ObjectId.isValid(postId)) {
-          console.error(`[Backend] Invalid postId format received: ${postId}`);
-          return res
-            .status(400)
-            .json({ error: "Invalid post ID format provided." });
-        }
-
-        const postObjectId = new ObjectId(postId);
-
-        // 1. Fetch the post to check current status and decrement safely
-        const postToUpdate = await postsCollection.findOne({
-          _id: postObjectId,
-        });
-
-        if (!postToUpdate) {
-          console.error(`[Backend] Post not found for ID: ${postId}`);
-          return res
-            .status(404)
-            .json({ error: "Volunteer post not found for this ID." });
-        }
-
-        if (postToUpdate.volunteersNeeded <= 0) {
-          console.log(
-            `[Backend] No more volunteers needed for post: ${postId}. Current: ${postToUpdate.volunteersNeeded}`
-          );
-          return res
-            .status(400)
-            .json({ error: "No more volunteers needed for this opportunity." });
-        }
-
-        // 2. Check for existing volunteer registration to prevent duplicates
-        const existingVolunteer = await volunteersCollection.findOne({
-          postId, // Stored as string in volunteers collection
-          userEmail,
-        });
-
-        if (existingVolunteer) {
-          console.log(
-            `[Backend] User ${userEmail} already registered for post: ${postId}`
-          );
-          return res
-            .status(400)
-            .json({ error: "You have already volunteered for this post." });
-        }
-
-        // 3. Register the volunteer in the volunteers collection
-        const volunteerResult = await volunteersCollection.insertOne({
-          postId,
-          userId,
-          userName,
-          userEmail,
-          registeredAt: new Date().toISOString(),
-        });
-        console.log(
-          `[Backend] Volunteer ${userEmail} registered for post ${postId}. Inserted ID: ${volunteerResult.insertedId}`
-        );
-
-        // 4. Decrement volunteersNeeded in the posts collection
-        const updatePostResult = await postsCollection.updateOne(
-          { _id: postObjectId },
-          { $inc: { volunteersNeeded: -1 } }
-        );
-        console.log(
-          `[Backend] Post update result for ${postId}: ${JSON.stringify(
-            updatePostResult
-          )}`
-        );
-
-        // Important: Fetch the updated post to send the *actual* current count back to the client.
-        const updatedPost = await postsCollection.findOne({
-          _id: postObjectId,
-        });
-        const newVolunteersNeeded = updatedPost
-          ? updatedPost.volunteersNeeded
-          : postToUpdate.volunteersNeeded; // Fallback to original if re-fetch fails
-
-        // ✅ Success Response: Send 201 Created with consistent JSON structure
-        res.status(201).json({
-          success: true,
-          message: "Volunteer registered successfully!",
-          registrationId: volunteerResult.insertedId,
-          newVolunteersNeeded: newVolunteersNeeded,
-        });
-      } catch (error) {
-        console.error(
-          "[Backend] Caught error in /api/volunteers POST handler:",
-          error
-        );
-        // Generic 500 error for unhandled exceptions
-        res
-          .status(500)
-          .json({
-            error: "Failed to register volunteer due to a server error.",
-          });
+        console.error("Error deleting volunteer request:", error);
+        res.status(500).send({ error: "Failed to delete volunteer request" });
       }
     });
 
